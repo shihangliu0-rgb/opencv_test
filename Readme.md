@@ -69,6 +69,7 @@ workspace/
  │    ├── 02_image_processing.py      # 图像处理篇代码演示
  │    ├── 03_feature_edge_contour.py  # 边缘与轮廓篇代码演示
  │    └── 04_advanced_applications.py # 进阶实战篇代码演示
+ ├── webcam_studio.py                 # 电影级实时摄像头工作室 (NEON VISION)
  ├── test_images/                     # 执行generate脚本后自动生成的测试图
  └── output_images/                   # 各模块演示代码的输出效果图保存路径
 ```
@@ -361,6 +362,28 @@ faces = face_cascade.detectMultiScale(gray_img, scaleFactor=1.1, minNeighbors=5,
 for (x, y, w, h) in faces:
     cv2.rectangle(img, (x, y), (x+w, y+h), (255, 0, 0), 2)
 ```
+
+### 5.5 实战彩蛋：NEON VISION 实时摄像头工作室
+根目录 `webcam_studio.py` 是一套纯 OpenCV 的电影级实时视觉引擎，打开电脑摄像头即可切换 8 种特效：
+
+| 键 | 模式 | 技术要点 |
+| :---: | :--- | :--- |
+| 1 | NEON EDGE | Canny + 色相循环辉光 + 扫描线 |
+| 2 | STAR FLOW | `goodFeaturesToTrack` + Lucas-Kanade 光流拖尾 |
+| 3 | FACE HUD | Haar 人脸 + 科幻角标 / 准星 / 锁定数据 |
+| 4 | KALEIDO | 极坐标扇区镜像拼成动态万花筒 |
+| 5 | THERMAL | CLAHE + `COLORMAP_INFERNO` 热成像 |
+| 6 | GHOST TRAIL | 多帧加权残影与品红染色 |
+| 7 | INK CARTOON | 双边滤波扁平化 + 自适应阈值墨线 |
+| 8 | AURORA MIX | Farneback 稠密光流驱动极光叠加 |
+
+```bash
+python3 webcam_studio.py              # 默认摄像头 0
+python3 webcam_studio.py --camera 1
+python3 webcam_studio.py --demo       # 无摄像头时用合成画面
+```
+
+`S` 截图、`R` 录像，文件写入 `output_images/webcam_studio/`。无 GUI 环境会自动导出 8 模式海报与预览视频。
 
 ### 5.4 视频流与摄像头处理架构 (`VideoCapture` / `VideoWriter`)
 无论是处理离散的 `.mp4` 视频文件，还是直接连接 USB 工业相机实时捕获流画面，OpenCV 的 `VideoCapture` 框架都提供了一致的抽象。

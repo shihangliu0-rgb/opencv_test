@@ -2,11 +2,12 @@ import os
 import subprocess
 import sys
 
-def run_script(script_path):
+def run_script(script_path, extra_args=None):
     print("\n" + "#"*70)
     print(f"  执行脚本: {script_path}")
     print("#"*70)
-    result = subprocess.run([sys.executable, script_path], capture_output=False)
+    cmd = [sys.executable, script_path] + (extra_args or [])
+    result = subprocess.run(cmd, capture_output=False)
     if result.returncode != 0:
         print(f"[错误] 脚本 {script_path} 执行失败!")
     else:
@@ -25,11 +26,13 @@ def main():
         "demos/01_basic_operations.py",
         "demos/02_image_processing.py",
         "demos/03_feature_edge_contour.py",
-        "demos/04_advanced_applications.py"
+        "demos/04_advanced_applications.py",
+        "webcam_studio.py",
     ]
 
     for script in demo_scripts:
-        run_script(script)
+        extra = ["--demo"] if script.endswith("webcam_studio.py") else None
+        run_script(script, extra)
 
     print("\n" + "="*70)
     print("  所有演示脚本运行完毕！生成的演示图片均已保存在 'output_images/' 目录。")
