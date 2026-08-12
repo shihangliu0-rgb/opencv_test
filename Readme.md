@@ -381,6 +381,8 @@ for (x, y, w, h) in faces:
 python3 webcam_studio.py              # 默认摄像头 0
 python3 webcam_studio.py --camera 1
 python3 webcam_studio.py --demo       # 无摄像头时用合成画面
+python3 webcam_studio.py --list       # 扫描本机设备
+# WSL2 请看 docs/WSL2_CAMERA.md：Windows 运行 windows_camera_bridge.py 再拉流
 ```
 
 `S` 截图、`R` 录像，文件写入 `output_images/webcam_studio/`。无 GUI 环境会自动导出 8 模式海报与预览视频。

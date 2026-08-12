@@ -23,15 +23,115 @@ NEON VISION — 电影级实时摄像头视觉工作室
 from __future__ import annotations
 
 import argparse
+import glob
 import math
 import os
+import platform
+import sys
 import time
 from collections import deque
-from dataclasses import dataclass, field
-from typing import Deque, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Deque, List, Optional, Tuple, Union
 
 import cv2
 import numpy as np
+
+CaptureSrc = Union[int, str]
+
+
+def _is_wsl() -> bool:
+    if os.path.exists("/proc/sys/fs/binfmt_misc/WSLInterop"):
+        return True
+    try:
+        with open("/proc/version", encoding="utf-8") as f:
+            return "microsoft" in f.read().lower()
+    except OSError:
+        return False
+
+
+def list_v4l_devices() -> List[str]:
+    return sorted(glob.glob("/dev/video*"))
+
+
+def print_wsl_camera_help() -> None:
+    print()
+    print("=" * 66)
+    print("  WSL2 默认看不到 Windows 笔记本摄像头。")
+    print("  VideoCapture(0) 打开的是 Linux 的 /dev/video0，不是任务栏里的摄像头。")
+    print()
+    print("  推荐（最稳）：Windows 推流 + WSL 拉流")
+    print("    1) 在 Windows PowerShell（不要在 WSL）运行:")
+    print("         pip install opencv-python")
+    print("         python windows_camera_bridge.py")
+    print("    2) 在 WSL 里:")
+    print("         WIN_IP=$(grep -m1 nameserver /etc/resolv.conf | awk '{print $2}')")
+    print('         python3 webcam_studio.py --source "http://${WIN_IP}:8765/mjpeg"')
+    print()
+    print("  说明文档: docs/WSL2_CAMERA.md")
+    print("  仅看特效:   python3 webcam_studio.py --demo")
+    print("=" * 66)
+
+
+def try_open_source(src: CaptureSrc, width: int, height: int):
+    """按后端优先级打开；成功读到一帧才算数。"""
+    backends = []
+    if isinstance(src, int) or (isinstance(src, str) and src.startswith("/dev/")):
+        if hasattr(cv2, "CAP_V4L2"):
+            backends.append(cv2.CAP_V4L2)
+        if hasattr(cv2, "CAP_ANY"):
+            backends.append(cv2.CAP_ANY)
+    else:
+        if hasattr(cv2, "CAP_FFMPEG"):
+            backends.append(cv2.CAP_FFMPEG)
+        backends.append(cv2.CAP_ANY)
+
+    for be in backends:
+        cap = cv2.VideoCapture(src, be)
+        if not cap.isOpened():
+            cap.release()
+            continue
+        if width:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        if height:
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        ok, frame = cap.read()
+        if ok and frame is not None:
+            return cap
+        cap.release()
+    return None
+
+
+def parse_source(raw: Optional[str], camera: int) -> CaptureSrc:
+    if raw is None or raw == "":
+        return camera
+    if raw.isdigit():
+        return int(raw)
+    return raw
+
+
+def cmd_list_cameras() -> int:
+    print(f"平台: {platform.platform()}")
+    print(f"WSL : {_is_wsl()}")
+    devs = list_v4l_devices()
+    if devs:
+        print("发现 V4L 设备:")
+        for d in devs:
+            print(f"  {d}")
+    else:
+        print("未发现 /dev/video*  （WSL2 上这很正常）")
+    print("尝试索引 0..3 ...")
+    found = False
+    for i in range(4):
+        cap = try_open_source(i, 320, 240)
+        if cap is not None:
+            print(f"  索引 {i}: 可读")
+            cap.release()
+            found = True
+        else:
+            print(f"  索引 {i}: 不可用")
+    if not found and _is_wsl():
+        print_wsl_camera_help()
+    return 0 if found else 1
 
 
 # ---------------------------------------------------------------------------
@@ -440,7 +540,7 @@ def draw_chrome(frame: np.ndarray, mode_idx: int, fps: float, rec: bool, help_on
 # ---------------------------------------------------------------------------
 @dataclass
 class Studio:
-    camera: int = 0
+    source: CaptureSrc = 0
     demo: bool = False
     mirror: bool = True
     mode: int = 0
@@ -601,9 +701,28 @@ class Studio:
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="NEON VISION — OpenCV 实时摄像头工作室")
-    p.add_argument("--camera", type=int, default=0, help="摄像头索引")
+    p = argparse.ArgumentParser(
+        description="NEON VISION — OpenCV 实时摄像头工作室",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "示例:\n"
+            "  python3 webcam_studio.py\n"
+            "  python3 webcam_studio.py --source 0\n"
+            "  python3 webcam_studio.py --source /dev/video0\n"
+            "  python3 webcam_studio.py --source http://172.x.x.x:8765/mjpeg\n"
+            "  python3 webcam_studio.py --demo\n"
+            "WSL2 说明见 docs/WSL2_CAMERA.md"
+        ),
+    )
+    p.add_argument("--camera", type=int, default=0, help="摄像头索引（兼容旧参数）")
+    p.add_argument(
+        "--source",
+        type=str,
+        default=None,
+        help="视频源：索引 / /dev/video0 / 视频文件 / http MJPEG",
+    )
     p.add_argument("--demo", action="store_true", help="强制使用合成演示画面")
+    p.add_argument("--list", action="store_true", help="列出本机可打开的摄像头后退出")
     p.add_argument("--no-mirror", action="store_true")
     p.add_argument("--mode", type=int, default=0, help="初始模式 0-7")
     return p.parse_args()
@@ -611,7 +730,14 @@ def parse_args():
 
 def main():
     args = parse_args()
-    studio = Studio(camera=args.camera, demo=args.demo, mirror=not args.no_mirror, mode=args.mode % 8)
+    if args.list:
+        sys.exit(cmd_list_cameras())
+    studio = Studio(
+        source=parse_source(args.source, args.camera),
+        demo=args.demo,
+        mirror=not args.no_mirror,
+        mode=args.mode % 8,
+    )
     studio.run()
 
 
