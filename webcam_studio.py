@@ -138,14 +138,14 @@ def cmd_list_cameras() -> int:
 # 视觉模式
 # ---------------------------------------------------------------------------
 MODES = [
-    "NEON EDGE",      # 0 赛博霓虹描边
-    "STAR FLOW",      # 1 光流星尘
-    "FACE HUD",       # 2 科幻人脸 HUD
-    "KALEIDO",        # 3 万花筒
-    "THERMAL",        # 4 热成像伪彩
-    "GHOST TRAIL",    # 5 残影拖尾
-    "INK CARTOON",    # 6 水墨卡通
-    "AURORA MIX",     # 7 极光混合
+    "CYBER RAIN",     # 0 黑客帝国雨 + 双色霓虹
+    "GLITCH",         # 1 RGB 分离 / 数据故障
+    "HOLO MESH",      # 2 全息线框人体
+    "FLOW RIBBON",    # 3 光流丝带星云
+    "WORMHOLE",       # 4 虫洞极坐标
+    "LIGHT PAINT",    # 5 运动光绘
+    "PRISM",          # 6 棱镜万花筒
+    "PLASMA LOCK",    # 7 等离子锁定 HUD
 ]
 
 
@@ -160,13 +160,12 @@ def _find_contours(bin_img):
 
 
 def neon_glow(edges: np.ndarray, color_bgr: Tuple[int, int, int], bloom: int = 15) -> np.ndarray:
-    """把二值边缘变成带辉光的霓虹层。"""
     h, w = edges.shape[:2]
     layer = np.zeros((h, w, 3), dtype=np.uint8)
     layer[edges > 0] = color_bgr
     k = bloom | 1
     glow = cv2.GaussianBlur(layer, (k, k), 0)
-    glow = cv2.addWeighted(glow, 1.8, layer, 1.0, 0)
+    glow = cv2.addWeighted(glow, 2.4, layer, 1.2, 0)
     return np.clip(glow, 0, 255).astype(np.uint8)
 
 
@@ -177,294 +176,386 @@ def hsv_shift(frame: np.ndarray, hue_delta: int) -> np.ndarray:
     return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
 
 
+def bloom(img: np.ndarray, thresh: int = 180, amount: float = 0.55) -> np.ndarray:
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    bright = cv2.threshold(gray, thresh, 255, cv2.THRESH_BINARY)[1]
+    hi = cv2.bitwise_and(img, img, mask=bright)
+    hi = cv2.GaussianBlur(hi, (0, 0), 8)
+    return cv2.addWeighted(img, 1.0, hi, amount, 0)
+
+
+def vignette(img: np.ndarray, strength: float = 0.55) -> np.ndarray:
+    h, w = img.shape[:2]
+    yy, xx = np.ogrid[:h, :w]
+    cy, cx = h / 2, w / 2
+    r = np.sqrt(((yy - cy) / cy) ** 2 + ((xx - cx) / cx) ** 2)
+    mask = np.clip(1.0 - strength * np.clip(r - 0.15, 0, None) ** 1.6, 0.15, 1.0)
+    return (img.astype(np.float32) * mask[..., None]).astype(np.uint8)
+
+
+def film_grain(img: np.ndarray, t: float, amp: int = 14) -> np.ndarray:
+    rng = np.random.default_rng(int(t * 40) % 100000)
+    noise = rng.integers(-amp, amp + 1, img.shape, dtype=np.int16)
+    return np.clip(img.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+
+
+def chroma_split(img: np.ndarray, px: int) -> np.ndarray:
+    h, w = img.shape[:2]
+    out = img.copy()
+    if px <= 0:
+        return out
+    out[:, :, 2] = np.roll(img[:, :, 2], px, axis=1)
+    out[:, :, 0] = np.roll(img[:, :, 0], -px, axis=1)
+    return out
+
+
+def hue_color(h: float) -> Tuple[int, int, int]:
+    c = cv2.cvtColor(np.uint8([[[int(h) % 180, 255, 255]]]), cv2.COLOR_HSV2BGR)[0, 0]
+    return int(c[0]), int(c[1]), int(c[2])
+
+
+_VIGNETTE_CACHE = {}
+
+
+def cached_vignette_mask(h, w, strength=0.55):
+    key = (h, w, strength)
+    if key not in _VIGNETTE_CACHE:
+        yy, xx = np.ogrid[:h, :w]
+        r = np.sqrt(((yy - h / 2) / (h / 2)) ** 2 + ((xx - w / 2) / (w / 2)) ** 2)
+        _VIGNETTE_CACHE[key] = np.clip(1.0 - strength * np.clip(r - 0.12, 0, None) ** 1.5, 0.12, 1.0).astype(np.float32)
+    return _VIGNETTE_CACHE[key]
+
+
 # ---------------------------------------------------------------------------
 # 各模式渲染
 # ---------------------------------------------------------------------------
-class NeonEdge:
-    def __call__(self, frame, t, state):
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (5, 5), 0)
-        edges = cv2.Canny(gray, 50, 140)
-        hue = int((t * 40) % 180)
-        color = cv2.cvtColor(np.uint8([[[hue, 255, 255]]]), cv2.COLOR_HSV2BGR)[0, 0]
-        glow = neon_glow(edges, tuple(int(c) for c in color), bloom=21)
-        dark = (frame.astype(np.float32) * 0.18).astype(np.uint8)
-        out = cv2.add(dark, glow)
-        # 扫描线
-        scan = int((t * 80) % frame.shape[0])
-        out[scan : scan + 2] = np.clip(out[scan : scan + 2].astype(np.int16) + 40, 0, 255)
-        return out
-
-
-class StarFlow:
+class CyberRain:
     def __init__(self):
-        self.prev_gray = None
-        self.pts: Optional[np.ndarray] = None
-        self.trails: List[Deque] = []
-        self.lk = dict(
-            winSize=(21, 21),
-            maxLevel=2,
-            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 12, 0.03),
-        )
+        self.cols = None
+        self.ys = None
+        self.speeds = None
+        self.glyphs = list("01アイウエオカキクケコサシスセソ01#$%&<>/\\|")
+
+    def _ensure(self, w, h):
+        n = max(24, w // 18)
+        if self.cols is not None and len(self.cols) == n:
+            return
+        rng = np.random.default_rng(7)
+        self.cols = rng.integers(0, w, n)
+        self.ys = rng.integers(-h, h, n).astype(np.float32)
+        self.speeds = rng.uniform(6, 22, n)
 
     def __call__(self, frame, t, state):
+        h, w = frame.shape[:2]
+        self._ensure(w, h)
+        gray = cv2.GaussianBlur(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (5, 5), 0)
+        edges = cv2.Canny(gray, 40, 120)
+        c1, c2 = hue_color(t * 35), hue_color(t * 35 + 90)
+        layer = np.zeros((h, w, 3), dtype=np.uint8)
+        layer[edges > 0] = c1
+        thick = cv2.dilate(edges, np.ones((3, 3), np.uint8), 1)
+        layer[thick > 0] = np.maximum(layer[thick > 0], c2)
+        glow = cv2.GaussianBlur(layer, (0, 0), 3)
+        glow2 = cv2.GaussianBlur(layer, (0, 0), 11)
+        dark = (frame.astype(np.float32) * 0.12)
+        out = np.clip(dark + glow2 * 1.6 + glow * 0.9 + layer * 0.7, 0, 255).astype(np.uint8)
+
+        rain = np.zeros_like(out)
+        for i, x in enumerate(self.cols):
+            self.ys[i] = (self.ys[i] + self.speeds[i]) % (h + 80) - 40
+            y = int(self.ys[i])
+            ch = self.glyphs[(i + int(t * 12)) % len(self.glyphs)]
+            g = 80 + int(175 * ((i * 17) % 10) / 10)
+            cv2.putText(rain, ch, (int(x), y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (40, g, 40), 1, cv2.LINE_AA)
+            cv2.putText(rain, ch, (int(x), y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 255, 180), 1, cv2.LINE_AA)
+        rain = cv2.GaussianBlur(rain, (3, 3), 0)
+        out = cv2.add(out, rain)
+        scan = int((t * 140) % h)
+        out[scan:scan + 3] = np.clip(out[scan:scan + 3].astype(np.int16) + 70, 0, 255)
+        for y in range(0, h, 3):
+            out[y] = (out[y].astype(np.int16) * 0.82).astype(np.uint8)
+        vm = cached_vignette_mask(h, w, 0.7)
+        out = (out.astype(np.float32) * vm[..., None]).astype(np.uint8)
+        return bloom(out, 160, 0.7)
+
+
+class GlitchCore:
+    def __call__(self, frame, t, state):
+        h, w = frame.shape[:2]
+        out = chroma_split(frame, int(6 + 10 * abs(math.sin(t * 7))))
+        # 随机横条撕裂
+        rng = np.random.default_rng(int(t * 18) % 99991)
+        for _ in range(7):
+            y = int(rng.integers(0, h - 12))
+            bh = int(rng.integers(4, 18))
+            shift = int(rng.integers(-40, 41))
+            out[y:y + bh] = np.roll(out[y:y + bh], shift, axis=1)
+        # 色块故障
+        if rng.random() > 0.35:
+            x, y = int(rng.integers(0, w - 80)), int(rng.integers(0, h - 50))
+            bw, bh = int(rng.integers(30, 120)), int(rng.integers(12, 50))
+            patch = out[y:y + bh, x:x + bw]
+            patch = hsv_shift(patch, int(rng.integers(0, 180)))
+            out[y:y + bh, x:x + bw] = patch
+        # 高对比 + 扫描
+        out = cv2.convertScaleAbs(out, alpha=1.25, beta=-10)
+        out = chroma_split(out, 4)
+        for y in range(0, h, 2):
+            out[y] = np.clip(out[y].astype(np.int16) - 18, 0, 255)
+        return bloom(vignette(out, 0.45), 200, 0.4)
+
+
+class HoloMesh:
+    def __init__(self):
+        self.prev = None
+
+    def __call__(self, frame, t, state):
+        h, w = frame.shape[:2]
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        h, w = gray.shape
-        canvas = (frame.astype(np.float32) * 0.25).astype(np.uint8)
+        blur = cv2.GaussianBlur(gray, (9, 9), 0)
+        _, mask = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # 取最大前景
+        contours, _ = _find_contours(mask)
+        canvas = np.zeros_like(frame)
+        canvas[:] = (8, 4, 18)
+        # 透视网格地面
+        for i in range(1, 14):
+            y = int(h * 0.45 + i * i * 1.8)
+            if y >= h:
+                break
+            a = int(40 + 180 * (i / 14))
+            cv2.line(canvas, (0, y), (w, y), (a, 40, a + 40), 1, cv2.LINE_AA)
+        for x in range(-w, w * 2, 50):
+            x2 = int(w / 2 + (x - w / 2) * 2.2)
+            cv2.line(canvas, (x, int(h * 0.48)), (x2, h), (70, 20, 90), 1, cv2.LINE_AA)
 
-        if self.prev_gray is None:
-            self.prev_gray = gray
-            self.pts = cv2.goodFeaturesToTrack(gray, 280, 0.01, 8)
-            self.trails = [deque(maxlen=14) for _ in range(len(self.pts) or 0)]
-            return canvas
+        if contours:
+            c = max(contours, key=cv2.contourArea)
+            if cv2.contourArea(c) > 1200:
+                hull = cv2.convexHull(c)
+                pts = cv2.goodFeaturesToTrack(gray, 90, 0.02, 12)
+                if pts is not None and len(pts) >= 4:
+                    pts2 = pts.reshape(-1, 2).astype(np.float32)
+                    try:
+                        rect = (0, 0, w, h)
+                        subdiv = cv2.Subdiv2D(rect)
+                        for p in pts2:
+                            subdiv.insert((float(p[0]), float(p[1])))
+                        tris = subdiv.getTriangleList()
+                        cyan = hue_color(90 + 20 * math.sin(t * 3))
+                        mag = hue_color(150)
+                        for tri in tris:
+                            p = tri.reshape(3, 2).astype(np.int32)
+                            if np.any(p[:, 0] < 0) or np.any(p[:, 0] >= w) or np.any(p[:, 1] < 0) or np.any(p[:, 1] >= h):
+                                continue
+                            col = cyan if (p[0, 0] + p[0, 1]) % 2 == 0 else mag
+                            cv2.polylines(canvas, [p], True, col, 1, cv2.LINE_AA)
+                    except cv2.error:
+                        pass
+                cv2.drawContours(canvas, [hull], -1, (255, 180, 80), 2, cv2.LINE_AA)
+                # 旋转环
+                M = cv2.moments(c)
+                if M["m00"] > 1:
+                    cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
+                    for k, rad in enumerate((70, 100, 140)):
+                        ang = t * (80 + k * 40)
+                        box = cv2.boxPoints(((cx, cy), (rad * 2, rad), ang))
+                        cv2.polylines(canvas, [np.int32(box)], True, hue_color(40 + k * 40 + t * 20), 1, cv2.LINE_AA)
+                    cv2.drawMarker(canvas, (cx, cy), (255, 255, 255), cv2.MARKER_CROSS, 16, 1)
 
-        if self.pts is None or len(self.pts) < 40:
-            self.pts = cv2.goodFeaturesToTrack(gray, 280, 0.01, 8)
-            self.trails = [deque(maxlen=14) for _ in range(len(self.pts) or 0)]
-
-        if self.pts is not None and len(self.pts):
-            nxt, st, _ = cv2.calcOpticalFlowPyrLK(self.prev_gray, gray, self.pts, None, **self.lk)
-            if nxt is not None and st is not None:
-                good_new = nxt[st.flatten() == 1]
-                good_old = self.pts[st.flatten() == 1]
-                # 对齐 trails
-                new_trails = []
-                gi = 0
-                for i, keep in enumerate(st.flatten()):
-                    if keep and gi < len(good_new):
-                        p = tuple(good_new[gi].ravel())
-                        if i < len(self.trails):
-                            tr = self.trails[i]
-                            tr.append(p)
-                            new_trails.append(tr)
-                        else:
-                            new_trails.append(deque([p], maxlen=14))
-                        gi += 1
-                self.trails = new_trails
-
-                for i, (n, o) in enumerate(zip(good_new, good_old)):
-                    x1, y1 = n.ravel()
-                    x0, y0 = o.ravel()
-                    speed = math.hypot(x1 - x0, y1 - y0)
-                    hue = int(min(179, 20 + speed * 18))
-                    col = cv2.cvtColor(np.uint8([[[hue, 255, 255]]]), cv2.COLOR_HSV2BGR)[0, 0]
-                    col = tuple(int(c) for c in col)
-                    if i < len(self.trails) and len(self.trails[i]) > 1:
-                        pts = np.array(self.trails[i], dtype=np.int32)
-                        cv2.polylines(canvas, [pts], False, col, 2, cv2.LINE_AA)
-                    cv2.circle(canvas, (int(x1), int(y1)), 2, (255, 255, 255), -1, cv2.LINE_AA)
-                self.pts = good_new.reshape(-1, 1, 2)
-
-        self.prev_gray = gray
-        # 星空闪点
-        rng = np.random.default_rng(int(t * 3) % 10000)
-        for _ in range(18):
-            sx, sy = int(rng.integers(0, w)), int(rng.integers(0, h))
-            cv2.circle(canvas, (sx, sy), 1, (180, 220, 255), -1)
-        return canvas
+        edges = cv2.Canny(gray, 50, 130)
+        canvas = cv2.add(canvas, neon_glow(edges, (255, 90, 220), 13))
+        self.prev = gray
+        return bloom(vignette(canvas, 0.5), 140, 0.65)
 
 
-class FaceHUD:
+class FlowRibbon:
+    def __init__(self):
+        self.prev = None
+        self.paint = None
+
+    def __call__(self, frame, t, state):
+        h, w = frame.shape[:2]
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if self.paint is None or self.paint.shape[:2] != (h, w):
+            self.paint = np.zeros_like(frame, dtype=np.float32)
+        self.paint *= 0.88
+        if self.prev is not None:
+            flow = cv2.calcOpticalFlowFarneback(self.prev, gray, None, 0.5, 3, 13, 3, 5, 1.1, 0)
+            mag, ang = cv2.cartToPolar(flow[..., 0], flow[..., 1], angleInDegrees=False)
+            hsv = np.zeros((h, w, 3), dtype=np.uint8)
+            hsv[..., 0] = (ang * 90 / np.pi).astype(np.uint8)
+            hsv[..., 1] = 255
+            hsv[..., 2] = np.clip(mag * 18, 0, 255).astype(np.uint8)
+            rgb = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR).astype(np.float32)
+            self.paint += rgb
+            # 稀疏亮点
+            ys, xs = np.where(mag > 2.2)
+            if len(xs) > 0:
+                step = max(1, len(xs) // 180)
+                for x, y in zip(xs[::step], ys[::step]):
+                    dx, dy = flow[y, x]
+                    col = tuple(int(c) for c in rgb[y, x])
+                    cv2.line(self.paint, (x, y), (int(x + dx * 4), int(y + dy * 4)), col, 2, cv2.LINE_AA)
+        self.prev = gray
+        base = frame.astype(np.float32) * 0.18
+        out = np.clip(base + self.paint * 0.085 + cv2.GaussianBlur(self.paint, (0, 0), 7) * 0.05, 0, 255)
+        return bloom(vignette(out.astype(np.uint8), 0.5), 150, 0.6)
+
+
+class Wormhole:
+    def __init__(self):
+        self.map_x = None
+        self.map_y = None
+        self.key = None
+
+    def _maps(self, h, w, t):
+        key = (h, w, int(t * 8))
+        if self.key == key:
+            return
+        self.key = key
+        cy, cx = h / 2, w / 2
+        yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+        dx, dy = xx - cx, yy - cy
+        r = np.sqrt(dx * dx + dy * dy) + 1e-5
+        a = np.arctan2(dy, dx) + 0.35 * math.sin(t * 1.4)
+        # 吸积盘扭曲
+        r2 = np.power(r, 0.72) * (0.85 + 0.15 * np.sin(a * 6 + t * 3))
+        self.map_x = (cx + r2 * np.cos(a + 0.0008 * r * math.sin(t))).astype(np.float32)
+        self.map_y = (cy + r2 * np.sin(a + 0.0008 * r * math.cos(t * 0.8))).astype(np.float32)
+
+    def __call__(self, frame, t, state):
+        h, w = frame.shape[:2]
+        self._maps(h, w, t)
+        warp = cv2.remap(frame, self.map_x, self.map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+        warp = hsv_shift(warp, int(t * 22) % 180)
+        warp = chroma_split(warp, 5)
+        # 中心亮环
+        cy, cx = h // 2, w // 2
+        pulse = 18 + int(10 * math.sin(t * 5))
+        cv2.circle(warp, (cx, cy), pulse, (255, 240, 200), 2, cv2.LINE_AA)
+        cv2.circle(warp, (cx, cy), pulse + 30, (80, 40, 255), 1, cv2.LINE_AA)
+        return bloom(vignette(warp, 0.65), 170, 0.7)
+
+
+class LightPaint:
+    def __init__(self):
+        self.prev = None
+        self.canvas = None
+
+    def __call__(self, frame, t, state):
+        h, w = frame.shape[:2]
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if self.canvas is None or self.canvas.shape[:2] != (h, w):
+            self.canvas = np.zeros((h, w, 3), dtype=np.float32)
+        self.canvas *= 0.965
+        if self.prev is not None:
+            diff = cv2.absdiff(gray, self.prev)
+            diff = cv2.GaussianBlur(diff, (7, 7), 0)
+            heat = np.clip(diff.astype(np.float32) * 3.2, 0, 255)
+            col = np.zeros((h, w, 3), dtype=np.float32)
+            hue = (t * 40) % 180
+            c = hue_color(hue)
+            c2 = hue_color(hue + 70)
+            m = heat / 255.0
+            col[..., 0] = c[0] * m + c2[0] * (1 - m) * m
+            col[..., 1] = c[1] * m
+            col[..., 2] = c[2] * m
+            self.canvas += col * 1.8
+        self.prev = gray
+        bg = (frame.astype(np.float32) * 0.08)
+        glow = cv2.GaussianBlur(self.canvas, (0, 0), 9)
+        out = np.clip(bg + self.canvas + glow * 0.55, 0, 255).astype(np.uint8)
+        return bloom(vignette(out, 0.45), 120, 0.8)
+
+
+class PrismGod:
+    def __call__(self, frame, t, state):
+        h, w = frame.shape[:2]
+        size = min(h, w)
+        y0, x0 = (h - size) // 2, (w - size) // 2
+        crop = cv2.resize(frame[y0:y0 + size, x0:x0 + size], (size, size))
+        cx = cy = size // 2
+        M = cv2.getRotationMatrix2D((cx, cy), (t * 22) % 360, 1.05)
+        rot = cv2.warpAffine(crop, M, (size, size))
+        yy, xx = np.ogrid[:size, :size]
+        ang = (np.degrees(np.arctan2(yy - cy, xx - cx)) + 360) % 360
+        sector = ((ang < 30) | (ang > 355)).astype(np.uint8) * 255
+        piece = cv2.bitwise_and(rot, rot, mask=sector)
+        canvas = np.zeros_like(rot)
+        for k in range(12):
+            Rm = cv2.getRotationMatrix2D((cx, cy), k * 30, 1.0)
+            spun = cv2.warpAffine(piece, Rm, (size, size))
+            canvas = np.maximum(canvas, spun)
+            canvas = np.maximum(canvas, cv2.flip(spun, 1))
+        canvas = hsv_shift(canvas, int(t * 18) % 180)
+        canvas = chroma_split(canvas, 6)
+        out = np.zeros_like(frame)
+        out[y0:y0 + size, x0:x0 + size] = canvas
+        # 星芒
+        out = cv2.addWeighted(out, 0.85, cv2.GaussianBlur(out, (0, 0), 12), 0.45, 0)
+        return bloom(vignette(out, 0.55), 160, 0.75)
+
+
+class PlasmaLock:
     def __init__(self):
         self.cascade = None
-        self.smooth = []  # list of (x,y,w,h)
-        haar = getattr(cv2, "data", None)
+        self.smooth = []
         clf = getattr(cv2, "CascadeClassifier", None)
+        haar = getattr(cv2, "data", None)
         if haar is not None and clf is not None:
             path = os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
             loaded = clf(path)
             if loaded is not None and not loaded.empty():
                 self.cascade = loaded
 
-    def _smooth(self, faces):
-        if len(faces) == 0:
-            self.smooth = [(int(x * 0.7 + sx * 0.3), int(y * 0.7 + sy * 0.3),
-                            int(w * 0.7 + sw * 0.3), int(h * 0.7 + sh * 0.3))
-                           for (x, y, w, h), (sx, sy, sw, sh) in zip(self.smooth, self.smooth)]
-            self.smooth = [b for b in self.smooth if b[2] > 20]
-            return self.smooth
-        self.smooth = [tuple(map(int, f)) for f in faces]
-        return self.smooth
-
-    def __call__(self, frame, t, state):
-        h, w = frame.shape[:2]
-        out = frame.copy()
-        # 暗角 + 青蓝调色
-        out = cv2.convertScaleAbs(out, alpha=0.85, beta=-8)
-        overlay = out.copy()
-        overlay[:, :, 0] = np.clip(overlay[:, :, 0].astype(np.int16) + 18, 0, 255)
-        out = cv2.addWeighted(out, 0.7, overlay, 0.3, 0)
-
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    def _boxes(self, gray):
         faces = []
         if self.cascade is not None:
-            faces = self.cascade.detectMultiScale(gray, 1.15, 5, minSize=(60, 60))
+            faces = self.cascade.detectMultiScale(gray, 1.15, 5, minSize=(50, 50))
         else:
-            # OpenCV 5 无 Haar 时：用运动/亮度椭圆当锁定目标
-            _, thr = cv2.threshold(cv2.GaussianBlur(gray, (15, 15), 0), 0, 255,
-                                   cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            _, thr = cv2.threshold(cv2.GaussianBlur(gray, (15, 15), 0), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             contours, _ = _find_contours(thr)
             if contours:
                 c = max(contours, key=cv2.contourArea)
                 if cv2.contourArea(c) > 800:
                     faces = [cv2.boundingRect(c)]
-        boxes = self._smooth(faces)
+        if len(faces):
+            self.smooth = [tuple(map(int, f)) for f in faces]
+        return self.smooth
 
-        # 网格
-        for x in range(0, w, 48):
-            cv2.line(out, (x, 0), (x, h), (40, 70, 70), 1)
-        for y in range(0, h, 48):
-            cv2.line(out, (0, y), (w, y), (40, 70, 70), 1)
-
-        cyan = (255, 220, 80)
+    def __call__(self, frame, t, state):
+        h, w = frame.shape[:2]
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        heat = cv2.applyColorMap(cv2.createCLAHE(3.0, (8, 8)).apply(gray), cv2.COLORMAP_MAGMA)
+        heat = cv2.addWeighted(heat, 0.75, frame, 0.15, 0)
+        # 六边形 HUD
+        out = heat.copy()
+        for y in range(0, h, 36):
+            off = 18 if (y // 36) % 2 else 0
+            for x in range(-off, w, 42):
+                cv2.circle(out, (x, y), 16, (40, 10, 50), 1, cv2.LINE_AA)
+        boxes = self._boxes(gray)
         for i, (x, y, fw, fh) in enumerate(boxes):
-            # 角标框
-            l = max(12, fw // 8)
-            pts = [
-                ((x, y), (x + l, y), (x, y + l)),
-                ((x + fw, y), (x + fw - l, y), (x + fw, y + l)),
-                ((x, y + fh), (x + l, y + fh), (x, y + fh - l)),
-                ((x + fw, y + fh), (x + fw - l, y + fh), (x + fw, y + fh - l)),
-            ]
-            for a, b, c in pts:
-                cv2.line(out, a, b, cyan, 2, cv2.LINE_AA)
-                cv2.line(out, a, c, cyan, 2, cv2.LINE_AA)
-            # 十字准星
             cx, cy = x + fw // 2, y + fh // 2
-            cv2.drawMarker(out, (cx, cy), cyan, cv2.MARKER_CROSS, 18, 1, cv2.LINE_AA)
-            cv2.circle(out, (cx, cy), max(fw, fh) // 2 + 8, cyan, 1, cv2.LINE_AA)
-            pulse = 0.5 + 0.5 * math.sin(t * 4)
-            cv2.circle(out, (cx, cy), int((max(fw, fh) // 2 + 16) * (0.9 + 0.1 * pulse)), (180, 160, 40), 1)
-            label = f"SUBJ-{i+1:02d}  LOCK  {fw}x{fh}"
-            cv2.putText(out, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, cyan, 1, cv2.LINE_AA)
-            # 侧边数据条
-            cv2.putText(out, f"ID {hash((x, y)) % 9000 + 1000}", (x + fw + 8, y + 18),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 255, 200), 1, cv2.LINE_AA)
-            cv2.putText(out, f"CONF {0.82 + 0.08 * pulse:.2f}", (x + fw + 8, y + 38),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 255, 200), 1, cv2.LINE_AA)
-
-        # 顶部 HUD 条
-        cv2.rectangle(out, (0, 0), (w, 36), (10, 18, 18), -1)
-        cv2.putText(out, f"NEON VISION  //  FACIAL ACQUISITION  //  T+{t:06.1f}s  //  TARGETS {len(boxes)}",
-                    (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.5, cyan, 1, cv2.LINE_AA)
-        return out
-
-
-class Kaleido:
-    def __call__(self, frame, t, state):
-        h, w = frame.shape[:2]
-        size = min(h, w)
-        y0, x0 = (h - size) // 2, (w - size) // 2
-        crop = frame[y0:y0 + size, x0:x0 + size]
-        # 取三角扇区并镜像拼成 8 瓣
-        cx, cy = size // 2, size // 2
-        angle = (t * 18) % 360
-        M = cv2.getRotationMatrix2D((cx, cy), angle, 1.0)
-        rot = cv2.warpAffine(crop, M, (size, size), flags=cv2.INTER_LINEAR)
-        mask = np.zeros((size, size), dtype=np.uint8)
-        wedge = np.array([[cx, cy], [size, 0], [size, size // 6]], dtype=np.int32)
-        # 更稳：用极坐标扇区
-        yy, xx = np.ogrid[:size, :size]
-        ang = (np.degrees(np.arctan2(yy - cy, xx - cx)) + 360) % 360
-        sector = ((ang < 45) | (ang > 360 - 1)).astype(np.uint8) * 255
-        piece = cv2.bitwise_and(rot, rot, mask=sector)
-
-        canvas = np.zeros_like(rot)
-        for k in range(8):
-            Rm = cv2.getRotationMatrix2D((cx, cy), k * 45, 1.0)
-            spun = cv2.warpAffine(piece, Rm, (size, size))
-            canvas = np.maximum(canvas, spun)
-            flipped = cv2.flip(spun, 1)
-            canvas = np.maximum(canvas, flipped)
-
-        # 放回画布并加暗角
-        out = np.zeros_like(frame)
-        out[y0:y0 + size, x0:x0 + size] = canvas
-        out = hsv_shift(out, int(t * 12) % 180)
-        return out
-
-
-class Thermal:
-    def __call__(self, frame, t, state):
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (7, 7), 0)
-        # 轻微 CLAHE 让层次更戏剧
-        clahe = cv2.createCLAHE(2.0, (8, 8))
-        gray = clahe.apply(gray)
-        heat = cv2.applyColorMap(gray, cv2.COLORMAP_INFERNO)
-        # 热点等高线
-        edges = cv2.Canny(gray, 80, 160)
-        heat[edges > 0] = (255, 255, 255)
-        return heat
-
-
-class GhostTrail:
-    def __init__(self):
-        self.buf: Deque[np.ndarray] = deque(maxlen=12)
-
-    def __call__(self, frame, t, state):
-        self.buf.append(frame.copy())
-        acc = np.zeros_like(frame, dtype=np.float32)
-        n = len(self.buf)
-        for i, f in enumerate(self.buf):
-            w = (i + 1) / n
-            # 越旧越偏品红
-            tint = f.astype(np.float32)
-            tint[:, :, 2] *= 0.6 + 0.4 * w
-            tint[:, :, 0] *= 1.2 - 0.2 * w
-            acc += tint * w
-        acc /= sum((i + 1) / n for i in range(n))
-        out = np.clip(acc, 0, 255).astype(np.uint8)
-        return cv2.addWeighted(out, 0.85, frame, 0.15, 0)
-
-
-class InkCartoon:
-    def __call__(self, frame, t, state):
-        # 双边滤波多次 = 扁平色块
-        smooth = frame
-        for _ in range(2):
-            smooth = cv2.bilateralFilter(smooth, 7, 50, 50)
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray = cv2.medianBlur(gray, 7)
-        edges = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
-                                      cv2.THRESH_BINARY, 9, 2)
-        edges_c = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-        cartoon = cv2.bitwise_and(smooth, edges_c)
-        # 水墨纸感
-        paper = cv2.cvtColor(cv2.cvtColor(cartoon, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR)
-        mix = cv2.addWeighted(cartoon, 0.65, paper, 0.35, 0)
-        return mix
-
-
-class AuroraMix:
-    def __init__(self):
-        self.prev = None
-
-    def __call__(self, frame, t, state):
-        h, w = frame.shape[:2]
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        # 流动极光层
-        yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
-        wave = (np.sin(xx * 0.01 + t * 1.7) + np.sin(yy * 0.02 - t * 1.1)) * 0.5
-        aurora = np.zeros_like(frame, dtype=np.float32)
-        aurora[:, :, 1] = (80 + 80 * wave).clip(0, 255)          # G
-        aurora[:, :, 0] = (40 + 60 * np.sin(wave + t)).clip(0, 255)  # B
-        aurora[:, :, 2] = (20 + 40 * np.cos(wave - t)).clip(0, 255)  # R
-
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        if self.prev is not None:
-            flow = cv2.calcOpticalFlowFarneback(self.prev, gray, None, 0.5, 3, 15, 3, 5, 1.2, 0)
-            mag, ang = cv2.cartToPolar(flow[..., 0], flow[..., 1])
-            mag = np.clip(mag * 12, 0, 1)
-            motion = np.dstack([mag, mag, mag])
-            aurora = aurora * (0.35 + 0.65 * motion)
-        self.prev = gray
-
-        base = (frame.astype(np.float32) * 0.55)
-        out = np.clip(base + aurora * 0.85, 0, 255).astype(np.uint8)
-        edges = cv2.Canny(gray, 60, 130)
-        out = cv2.add(out, neon_glow(edges, (180, 255, 120), bloom=11))
-        return out
+            pulse = 0.5 + 0.5 * math.sin(t * 6)
+            col = (80, 255, 255)
+            for k in range(3):
+                cv2.circle(out, (cx, cy), int((max(fw, fh) // 2 + 10 + k * 14) * (0.92 + 0.08 * pulse)), col, 1, cv2.LINE_AA)
+            # 三角锁定
+            r = max(fw, fh) // 2 + 24
+            tri = []
+            for a in range(3):
+                ang = math.radians(t * 50 + a * 120)
+                tri.append((int(cx + r * math.cos(ang)), int(cy + r * math.sin(ang))))
+            cv2.polylines(out, [np.array(tri)], True, (255, 80, 200), 2, cv2.LINE_AA)
+            cv2.putText(out, f"LOCK {i+1}  {fw}px", (x, y - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.55, col, 2, cv2.LINE_AA)
+            # 侧边频谱
+            for b in range(12):
+                bh = int(8 + 28 * abs(math.sin(t * 8 + b)))
+                cv2.rectangle(out, (x + fw + 10 + b * 7, y + fh - bh), (x + fw + 15 + b * 7, y + fh), (255, 180, 40), -1)
+        out = chroma_split(out, 3)
+        return bloom(vignette(out, 0.4), 180, 0.5)
 
 
 # ---------------------------------------------------------------------------
@@ -550,27 +641,41 @@ class Studio:
 
     def build_fx(self):
         return [
-            NeonEdge(),
-            StarFlow(),
-            FaceHUD(),
-            Kaleido(),
-            Thermal(),
-            GhostTrail(),
-            InkCartoon(),
-            AuroraMix(),
+            CyberRain(),
+            GlitchCore(),
+            HoloMesh(),
+            FlowRibbon(),
+            Wormhole(),
+            LightPaint(),
+            PrismGod(),
+            PlasmaLock(),
         ]
 
     def open_capture(self):
         if self.demo:
+            print("[INFO] --demo：使用合成画面，不打开硬件。")
             return None
-        cap = cv2.VideoCapture(self.camera)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        if not cap.isOpened():
-            print("[WARN] 无法打开摄像头，自动切换到合成演示源。")
-            self.demo = True
-            return None
-        return cap
+        candidates = [self.source]
+        if self.source == 0:
+            candidates.extend(list_v4l_devices())
+            candidates.extend(range(1, 4))
+        seen, uniq = set(), []
+        for c in candidates:
+            if c not in seen:
+                seen.add(c)
+                uniq.append(c)
+        print(f"[INFO] 尝试打开视频源: {uniq}")
+        for src in uniq:
+            print(f"[INFO]   -> {src!r}")
+            cap = try_open_source(src, self.width, self.height)
+            if cap is not None:
+                print(f"[OK] 已打开: {src!r}")
+                return cap
+        print("[WARN] 无法打开任何摄像头 / 视频源，切换到合成演示画面。")
+        if _is_wsl() or not list_v4l_devices():
+            print_wsl_camera_help()
+        self.demo = True
+        return None
 
     def run(self):
         os.makedirs("output_images/webcam_studio", exist_ok=True)

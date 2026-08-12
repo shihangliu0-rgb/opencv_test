@@ -368,14 +368,14 @@ for (x, y, w, h) in faces:
 
 | 键 | 模式 | 技术要点 |
 | :---: | :--- | :--- |
-| 1 | NEON EDGE | Canny + 色相循环辉光 + 扫描线 |
-| 2 | STAR FLOW | `goodFeaturesToTrack` + Lucas-Kanade 光流拖尾 |
-| 3 | FACE HUD | Haar 人脸 + 科幻角标 / 准星 / 锁定数据 |
-| 4 | KALEIDO | 极坐标扇区镜像拼成动态万花筒 |
-| 5 | THERMAL | CLAHE + `COLORMAP_INFERNO` 热成像 |
-| 6 | GHOST TRAIL | 多帧加权残影与品红染色 |
-| 7 | INK CARTOON | 双边滤波扁平化 + 自适应阈值墨线 |
-| 8 | AURORA MIX | Farneback 稠密光流驱动极光叠加 |
+| 1 | CYBER RAIN | 双色霓虹描边 + 字符雨 + 扫描线 + Bloom |
+| 2 | GLITCH | RGB 分离、横条撕裂、色块故障 |
+| 3 | HOLO MESH | Delaunay 全息网格 + 透视地面 + 旋转环 |
+| 4 | FLOW RIBBON | Farneback 光流丝带星云 |
+| 5 | WORMHOLE | 吸积盘极坐标扭曲虫洞 |
+| 6 | LIGHT PAINT | 运动能量光绘拖尾 |
+| 7 | PRISM | 12 瓣棱镜万花筒 + 色散 |
+| 8 | PLASMA LOCK | Magma 热成像 + 三角锁定 HUD |
 
 ```bash
 python3 webcam_studio.py              # 默认摄像头 0
